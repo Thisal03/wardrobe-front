@@ -7,6 +7,8 @@ import ResultGallery from '@/components/ResultGallery';
 import { generateMatchingSet, checkJobStatus, type StatusResponse, type ClothingImages } from '@/lib/api/matchingSet';
 import { compressImage } from '@/lib/utils/imageCompression';
 
+type ClothingType = 'top' | 'bottom' | 'outer' | 'dress';
+
 export default function Home() {
   const [modelImage, setModelImage] = useState<File[]>([]);
   const [topImage, setTopImage] = useState<File[]>([]);
@@ -21,7 +23,21 @@ export default function Home() {
   const [statusMessage, setStatusMessage] = useState<string>('');
   const [generatedImages, setGeneratedImages] = useState<string | string[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [currentStep, setCurrentStep] = useState<'initial' | 'adding'>('initial');
+  const [selectedGeneratedImage, setSelectedGeneratedImage] = useState<string | null>(null);
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Utility function to convert image URL to File
+  const urlToFile = async (url: string, filename: string = 'generated-image.png'): Promise<File> => {
+    const response = await fetch(url);
+    const blob = await response.blob();
+    return new File([blob], filename, { type: blob.type || 'image/png' });
+  };
+
+  // Check if any clothing is uploaded
+  const hasClothingUploaded = (): boolean => {
+    return topImage.length > 0 || bottomImage.length > 0 || outerImage.length > 0 || dressImage.length > 0;
+  };
 
   // Cleanup polling on unmount
   useEffect(() => {
@@ -91,17 +107,32 @@ export default function Home() {
     setStatus('');
     setStatusMessage('');
 
-    if (modelImage.length === 0) {
+    // For initial step, require model image
+    if (currentStep === 'initial' && modelImage.length === 0) {
       setError('Please select a model image');
       return;
     }
 
-    // Check if at least one clothing image is selected
-    const hasClothingImage = topImage.length > 0 || bottomImage.length > 0 || 
-                              outerImage.length > 0 || dressImage.length > 0;
-    
-    if (!hasClothingImage) {
-      setError('Please select at least one clothing image (top, bottom, outer, or dress)');
+    // Check which clothing image is selected
+    let selectedClothingType: ClothingType | null = null;
+    let selectedClothingFile: File | null = null;
+
+    if (topImage.length > 0) {
+      selectedClothingType = 'top';
+      selectedClothingFile = topImage[0];
+    } else if (bottomImage.length > 0) {
+      selectedClothingType = 'bottom';
+      selectedClothingFile = bottomImage[0];
+    } else if (outerImage.length > 0) {
+      selectedClothingType = 'outer';
+      selectedClothingFile = outerImage[0];
+    } else if (dressImage.length > 0) {
+      selectedClothingType = 'dress';
+      selectedClothingFile = dressImage[0];
+    }
+
+    if (!selectedClothingFile || !selectedClothingType) {
+      setError('Please select a clothing item to add');
       return;
     }
 
@@ -109,47 +140,45 @@ export default function Home() {
     setIsCompressing(true);
 
     try {
-      // Compress all images before sending
-      const compressionPromises: Promise<File>[] = [
-        compressImage(modelImage[0], 1920, 1920, 0.8, 1),
-      ];
-
-      const clothingTypes: Array<{ type: keyof ClothingImages; files: File[] }> = [
-        { type: 'top_image', files: topImage },
-        { type: 'bottom_image', files: bottomImage },
-        { type: 'outer_image', files: outerImage },
-        { type: 'dress_image', files: dressImage },
-      ];
-
-      for (const { files } of clothingTypes) {
-        if (files.length > 0) {
-          compressionPromises.push(compressImage(files[0], 1920, 1920, 0.8, 1));
+      // Get the model image (either initial or from generated result)
+      let modelFile: File;
+      if (currentStep === 'initial') {
+        modelFile = await compressImage(modelImage[0], 1920, 1920, 0.8, 1);
+      } else {
+        // Use the selected generated image as the new model
+        if (!selectedGeneratedImage) {
+          // If no image selected, use the first one
+          const imageArray = Array.isArray(generatedImages) ? generatedImages : [generatedImages];
+          if (imageArray.length === 0 || !imageArray[0]) {
+            throw new Error('No generated image available to continue');
+          }
+          const file = await urlToFile(imageArray[0], 'model-image.png');
+          modelFile = await compressImage(file, 1920, 1920, 0.8, 1);
+        } else {
+          const file = await urlToFile(selectedGeneratedImage, 'model-image.png');
+          modelFile = await compressImage(file, 1920, 1920, 0.8, 1);
         }
       }
 
-      const compressedImages = await Promise.all(compressionPromises);
+      // Compress the clothing image
+      const compressedClothing = await compressImage(selectedClothingFile, 1920, 1920, 0.8, 1);
       
       setIsCompressing(false);
 
-      // Build clothing images object
+      // Build clothing images object with only the selected clothing
       const clothingImages: ClothingImages = {};
-      let compressedIndex = 1; // Start after model image
-
-      if (topImage.length > 0) {
-        clothingImages.top_image = compressedImages[compressedIndex++];
-      }
-      if (bottomImage.length > 0) {
-        clothingImages.bottom_image = compressedImages[compressedIndex++];
-      }
-      if (outerImage.length > 0) {
-        clothingImages.outer_image = compressedImages[compressedIndex++];
-      }
-      if (dressImage.length > 0) {
-        clothingImages.dress_image = compressedImages[compressedIndex++];
+      if (selectedClothingType === 'top') {
+        clothingImages.top_image = compressedClothing;
+      } else if (selectedClothingType === 'bottom') {
+        clothingImages.bottom_image = compressedClothing;
+      } else if (selectedClothingType === 'outer') {
+        clothingImages.outer_image = compressedClothing;
+      } else if (selectedClothingType === 'dress') {
+        clothingImages.dress_image = compressedClothing;
       }
 
       const response = await generateMatchingSet(
-        compressedImages[0], // Model image
+        modelFile,
         clothingImages,
         numOutputs
       );
@@ -157,6 +186,11 @@ export default function Home() {
       if (response.status === 'success' && response.data.prediction_id) {
         setPredictionId(response.data.prediction_id);
         setStatus(response.data.status);
+        // Clear the selected clothing after submission
+        setTopImage([]);
+        setBottomImage([]);
+        setOuterImage([]);
+        setDressImage([]);
         startPolling(response.data.prediction_id);
       } else {
         throw new Error(response.message || 'Failed to start generation');
@@ -167,6 +201,21 @@ export default function Home() {
       setIsGenerating(false);
       setIsCompressing(false);
     }
+  };
+
+  // Handle continuing to add more clothing
+  const handleContinueAdding = () => {
+    setCurrentStep('adding');
+    // Don't clear selectedGeneratedImage - let user keep their selection or choose a different one
+    // Clear all clothing uploaders
+    setTopImage([]);
+    setBottomImage([]);
+    setOuterImage([]);
+    setDressImage([]);
+    // Clear status and error to show the form
+    setStatus('');
+    setStatusMessage('');
+    setError(null);
   };
 
   const handleReset = () => {
@@ -182,9 +231,36 @@ export default function Home() {
     setGeneratedImages(null);
     setError(null);
     setIsGenerating(false);
+    setCurrentStep('initial');
+    setSelectedGeneratedImage(null);
     if (pollingIntervalRef.current) {
       clearInterval(pollingIntervalRef.current);
       pollingIntervalRef.current = null;
+    }
+  };
+
+  // Handle clothing upload - clear other uploaders when one is uploaded
+  const handleClothingUpload = (type: ClothingType, files: File[]) => {
+    // Clear all other clothing uploaders when one is uploaded
+    if (type !== 'top') setTopImage([]);
+    if (type !== 'bottom') setBottomImage([]);
+    if (type !== 'outer') setOuterImage([]);
+    if (type !== 'dress') setDressImage([]);
+    
+    // Set the selected one
+    switch (type) {
+      case 'top':
+        setTopImage(files);
+        break;
+      case 'bottom':
+        setBottomImage(files);
+        break;
+      case 'outer':
+        setOuterImage(files);
+        break;
+      case 'dress':
+        setDressImage(files);
+        break;
     }
   };
 
@@ -213,7 +289,7 @@ export default function Home() {
             </div>
           )}
 
-          {!generatedImages && (
+          {(!generatedImages || currentStep === 'adding') && !isGenerating && (
             <form onSubmit={handleSubmit} className="space-y-6">
               {/* Two-column layout: Model on left, Clothes on right */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 lg:gap-8">
@@ -227,20 +303,30 @@ export default function Home() {
                         </svg>
                         Model Photo
                       </h2>
-                      <p className="text-xs text-gray-500 dark:text-gray-400 ml-7 mt-1">Upload a photo of the person</p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 ml-7 mt-1">
+                        {currentStep === 'initial' ? 'Upload a photo of the person' : 'Using generated image as model'}
+                      </p>
                     </div>
-                    <ImageUpload
-                      label="Model Image (Person Photo)"
-                      acceptMultiple={false}
-                      onFilesChange={setModelImage}
-                      selectedFiles={modelImage}
-                      required
-                      showCompressionNote={true}
-                    />
+                    {currentStep === 'initial' ? (
+                      <ImageUpload
+                        label="Model Image (Person Photo)"
+                        acceptMultiple={false}
+                        onFilesChange={setModelImage}
+                        selectedFiles={modelImage}
+                        required
+                        showCompressionNote={true}
+                      />
+                    ) : (
+                      <div className="border-2 border-gray-300 dark:border-gray-700 rounded-lg p-4 bg-gray-50 dark:bg-gray-900">
+                        <p className="text-sm text-gray-600 dark:text-gray-400 text-center">
+                          Using the generated image from the previous step as the model
+                        </p>
+                      </div>
+                    )}
                   </div>
                 </div>
 
-                {/* Right side - Clothing Images stacked vertically */}
+                {/* Right side - Clothing Images - Show all, hide others when one is uploaded */}
                 <div className="space-y-4">
                   <div className="mb-4 pb-4 border-b border-gray-200 dark:border-gray-700">
                     <h2 className="text-lg font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-2">
@@ -249,40 +335,90 @@ export default function Home() {
                       </svg>
                       Clothing Items
                     </h2>
-                    <p className="text-xs text-gray-500 dark:text-gray-400 ml-7 mt-1">Upload at least one clothing item (optional)</p>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 ml-7 mt-1">
+                      Upload one clothing item at a time
+                    </p>
                   </div>
                   
-                  <ImageUpload
-                    label="Top Image (Shirt/Top)"
-                    acceptMultiple={false}
-                    onFilesChange={setTopImage}
-                    selectedFiles={topImage}
-                    showCompressionNote={true}
-                  />
+                  {!hasClothingUploaded() && (
+                    <>
+                      <ImageUpload
+                        label="Top Image (Shirt/Top)"
+                        acceptMultiple={false}
+                        onFilesChange={(files) => handleClothingUpload('top', files)}
+                        selectedFiles={topImage}
+                        showCompressionNote={true}
+                      />
 
-                  <ImageUpload
-                    label="Bottom Image (Pants/Skirt)"
-                    acceptMultiple={false}
-                    onFilesChange={setBottomImage}
-                    selectedFiles={bottomImage}
-                    showCompressionNote={true}
-                  />
+                      <ImageUpload
+                        label="Bottom Image (Pants/Skirt)"
+                        acceptMultiple={false}
+                        onFilesChange={(files) => handleClothingUpload('bottom', files)}
+                        selectedFiles={bottomImage}
+                        showCompressionNote={true}
+                      />
 
-                  <ImageUpload
-                    label="Outer Image (Jacket/Coat)"
-                    acceptMultiple={false}
-                    onFilesChange={setOuterImage}
-                    selectedFiles={outerImage}
-                    showCompressionNote={true}
-                  />
+                      <ImageUpload
+                        label="Outer Image (Jacket/Coat)"
+                        acceptMultiple={false}
+                        onFilesChange={(files) => handleClothingUpload('outer', files)}
+                        selectedFiles={outerImage}
+                        showCompressionNote={true}
+                      />
 
-                  <ImageUpload
-                    label="Dress Image (One-piece)"
-                    acceptMultiple={false}
-                    onFilesChange={setDressImage}
-                    selectedFiles={dressImage}
-                    showCompressionNote={true}
-                  />
+                      <ImageUpload
+                        label="Dress Image (One-piece)"
+                        acceptMultiple={false}
+                        onFilesChange={(files) => handleClothingUpload('dress', files)}
+                        selectedFiles={dressImage}
+                        showCompressionNote={true}
+                      />
+                    </>
+                  )}
+
+                  {hasClothingUploaded() && (
+                    <>
+                      {topImage.length > 0 && (
+                        <ImageUpload
+                          label="Top Image (Shirt/Top)"
+                          acceptMultiple={false}
+                          onFilesChange={(files) => handleClothingUpload('top', files)}
+                          selectedFiles={topImage}
+                          showCompressionNote={true}
+                        />
+                      )}
+
+                      {bottomImage.length > 0 && (
+                        <ImageUpload
+                          label="Bottom Image (Pants/Skirt)"
+                          acceptMultiple={false}
+                          onFilesChange={(files) => handleClothingUpload('bottom', files)}
+                          selectedFiles={bottomImage}
+                          showCompressionNote={true}
+                        />
+                      )}
+
+                      {outerImage.length > 0 && (
+                        <ImageUpload
+                          label="Outer Image (Jacket/Coat)"
+                          acceptMultiple={false}
+                          onFilesChange={(files) => handleClothingUpload('outer', files)}
+                          selectedFiles={outerImage}
+                          showCompressionNote={true}
+                        />
+                      )}
+
+                      {dressImage.length > 0 && (
+                        <ImageUpload
+                          label="Dress Image (One-piece)"
+                          acceptMultiple={false}
+                          onFilesChange={(files) => handleClothingUpload('dress', files)}
+                          selectedFiles={dressImage}
+                          showCompressionNote={true}
+                        />
+                      )}
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -311,12 +447,12 @@ export default function Home() {
                 <div className="flex gap-4">
                   <button
                     type="submit"
-                    disabled={isGenerating || modelImage.length === 0 || (!topImage.length && !bottomImage.length && !outerImage.length && !dressImage.length)}
+                    disabled={isGenerating || (currentStep === 'initial' && modelImage.length === 0) || !hasClothingUploaded()}
                     className="flex-1 px-6 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-all duration-200 shadow-md hover:shadow-lg disabled:shadow-none cursor-pointer active:scale-[0.98]"
                   >
-                    {isCompressing ? 'Compressing images...' : isGenerating ? 'Generating...' : 'Generate Virtual Try-On'}
+                    {isCompressing ? 'Compressing images...' : isGenerating ? 'Generating...' : currentStep === 'initial' ? 'Generate Virtual Try-On' : 'Add Clothing & Generate'}
                   </button>
-                  {(modelImage.length > 0 || topImage.length > 0 || bottomImage.length > 0 || outerImage.length > 0 || dressImage.length > 0) && (
+                  {(modelImage.length > 0 || hasClothingUploaded() || generatedImages) && (
                     <button
                       type="button"
                       onClick={handleReset}
@@ -332,16 +468,41 @@ export default function Home() {
           )}
 
           {generatedImages && (
-            <div className="space-y-6">
-              <ResultGallery images={generatedImages} />
-              <div className="flex justify-center">
-                <button
-                  onClick={handleReset}
-                  className="px-6 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-all duration-200 cursor-pointer shadow-md hover:shadow-lg active:scale-[0.98]"
-                >
-                  Generate Another
-                </button>
-              </div>
+            <div className="space-y-6 mb-6">
+              <ResultGallery 
+                images={generatedImages} 
+                onImageSelect={setSelectedGeneratedImage}
+                selectedImage={selectedGeneratedImage}
+              />
+              {currentStep !== 'adding' && (
+                <div className="flex justify-center gap-4">
+                  <button
+                    onClick={handleContinueAdding}
+                    className="px-6 py-3 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 transition-all duration-200 cursor-pointer shadow-md hover:shadow-lg active:scale-[0.98]"
+                  >
+                    Continue Adding Clothing
+                  </button>
+                  <button
+                    onClick={handleReset}
+                    className="px-6 py-3 bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200 rounded-lg font-medium hover:bg-gray-300 dark:hover:bg-gray-600 transition-all duration-200 cursor-pointer active:scale-[0.98]"
+                  >
+                    Start Over
+                  </button>
+                </div>
+              )}
+              {currentStep === 'adding' && (
+                <div className="p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
+                  <div className="flex items-center gap-2 mb-2">
+                    <svg className="w-5 h-5 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <p className="text-blue-800 dark:text-blue-200 font-semibold">Add More Clothing</p>
+                  </div>
+                  <p className="text-sm text-blue-700 dark:text-blue-300">
+                    Select an image above to use as the model for the next generation, or we'll use the first image by default.
+                  </p>
+                </div>
+              )}
             </div>
           )}
         </div>
